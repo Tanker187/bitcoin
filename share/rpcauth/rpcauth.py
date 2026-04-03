@@ -8,6 +8,7 @@ from getpass import getpass
 from secrets import token_hex, token_urlsafe
 import hmac
 import json
+import hashlib
 
 def generate_salt(size):
     """Create size byte hex salt"""
@@ -18,8 +19,11 @@ def generate_password():
     return token_urlsafe(32)
 
 def password_to_hmac(salt, password):
-    m = hmac.new(salt.encode('utf-8'), password.encode('utf-8'), 'SHA256')
-    return m.hexdigest()
+    # Derive a password hash using a computationally expensive KDF
+    password_bytes = password.encode('utf-8')
+    salt_bytes = salt.encode('utf-8')
+    derived = hashlib.pbkdf2_hmac('sha256', password_bytes, salt_bytes, 100000)
+    return derived.hex()
 
 def main():
     parser = ArgumentParser(description='Create login credentials for a JSON-RPC user')
