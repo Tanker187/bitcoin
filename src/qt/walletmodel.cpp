@@ -464,7 +464,6 @@ WalletModel::UnlockContext::~UnlockContext()
 bool WalletModel::bumpFee(Txid hash, Txid& new_hash)
 {
     CCoinControl coin_control;
-    coin_control.m_signal_bip125_rbf = true;
     std::vector<bilingual_str> errors;
     CAmount old_fee;
     CAmount new_fee;
@@ -517,7 +516,7 @@ bool WalletModel::bumpFee(Txid hash, Txid& new_hash)
         // "Create Unsigned" clicked
         PartiallySignedTransaction psbtx(mtx);
         bool complete = false;
-        const auto err{wallet().fillPSBT(std::nullopt, /*sign=*/false, /*bip32derivs=*/true, nullptr, psbtx, complete)};
+        const auto err{wallet().fillPSBT({.sign = false, .bip32_derivs = true}, nullptr, psbtx, complete)};
         if (err || complete) {
             QMessageBox::critical(nullptr, tr("Fee bump error"), tr("Can't draft transaction."));
             return false;

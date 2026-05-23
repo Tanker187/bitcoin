@@ -48,11 +48,13 @@ static const unsigned int MAX_CMPCTBLOCKS_INFLIGHT_PER_BLOCK = 3;
 /** Number of headers sent in one getheaders result. We rely on the assumption that if a peer sends
  *  less than this number, we reached its tip. Changing this value is a protocol upgrade. */
 static const unsigned int MAX_HEADERS_RESULTS = 2000;
+/** The compactblocks version we support. See BIP 152. */
+static constexpr uint64_t CMPCTBLOCKS_VERSION{2};
 
 struct CNodeStateStats {
     int nSyncHeight = -1;
     int nCommonHeight = -1;
-    std::chrono::microseconds m_ping_wait;
+    NodeClock::duration m_ping_wait;
     std::vector<int> vHeightInFlight;
     bool m_relay_txs;
     int m_inv_to_send = 0;

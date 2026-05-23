@@ -535,6 +535,27 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
             # Wait for nodes to stop
             node.wait_until_stopped()
 
+    def cleanup_partially_started_nodes(self):
+        """Tear down nodes left running after a failed start_nodes().
+
+        After start_nodes() raises (e.g. FailedToStartError), some nodes may be
+        RPC-connected, some may have a live process without RPC, and some may
+        already have exited. Stop the connected ones cleanly and force-kill the
+        rest so the framework's teardown can proceed.
+        """
+        for node in self.nodes:
+            if not node.running:
+                continue
+            if node.rpc_connected:
+                node.stop_node(wait=node.rpc_timeout)
+            else:
+                node.process.kill()
+                node.process.wait(timeout=node.rpc_timeout)
+                node.process = None
+                node.stdout.close()
+                node.stderr.close()
+                node.running = False
+
     def restart_node(self, i, extra_args=None, clear_addrman=False, *, expected_stderr=''):
         """Stop and start a test node"""
         self.stop_node(i, expected_stderr=expected_stderr)
@@ -549,16 +570,20 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
     def wait_for_node_exit(self, i, timeout):
         self.nodes[i].process.wait(timeout)
 
-    def connect_nodes(self, a, b, *, peer_advertises_v2=None, wait_for_connect: bool = True):
-        """
-        Kwargs:
-            wait_for_connect: if True, block until the nodes are verified as connected. You might
-                want to disable this when using -stopatheight with one of the connected nodes,
-                since there will be a race between the actual connection and performing
-                the assertions before one node shuts down.
-        """
+    def connect_nodes(self, a, b, *, peer_advertises_v2=None):
         from_connection = self.nodes[a]
         to_connection = self.nodes[b]
+
+        # Use subversion as peer id. Test nodes have their node number appended to the user agent string
+        from_connection_subver = from_connection.getnetworkinfo()['subversion']
+        to_connection_subver = to_connection.getnetworkinfo()['subversion']
+
+        def find_conn(node, peer_subversion, inbound):
+            return next(filter(lambda peer: peer['subver'] == peer_subversion and peer['inbound'] == inbound, node.getpeerinfo()), None)
+
+        self.wait_until(lambda: not find_conn(from_connection, to_connection_subver, inbound=False))
+        self.wait_until(lambda: not find_conn(to_connection, from_connection_subver, inbound=True))
+
         ip_port = "127.0.0.1:" + str(p2p_port(b))
 
         if peer_advertises_v2 is None:
@@ -570,16 +595,6 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
             # skip the optional third argument if it matches the default, for
             # compatibility with older clients
             from_connection.addnode(ip_port, "onetry")
-
-        if not wait_for_connect:
-            return
-
-        # Use subversion as peer id. Test nodes have their node number appended to the user agent string
-        from_connection_subver = from_connection.getnetworkinfo()['subversion']
-        to_connection_subver = to_connection.getnetworkinfo()['subversion']
-
-        def find_conn(node, peer_subversion, inbound):
-            return next(filter(lambda peer: peer['subver'] == peer_subversion and peer['inbound'] == inbound, node.getpeerinfo()), None)
 
         self.wait_until(lambda: find_conn(from_connection, to_connection_subver, inbound=False) is not None)
         self.wait_until(lambda: find_conn(to_connection, from_connection_subver, inbound=True) is not None)

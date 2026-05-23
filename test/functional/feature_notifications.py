@@ -9,7 +9,6 @@ import platform
 from test_framework.address import ADDRESS_BCRT1_UNSPENDABLE
 from test_framework.blocktools import (
     create_block,
-    create_coinbase,
 )
 from test_framework.descriptors import descsum_create
 from test_framework.test_framework import BitcoinTestFramework
@@ -32,6 +31,10 @@ LARGE_WORK_INVALID_CHAIN_WARNING = (
 def notify_outputname(walletname, txid):
     return txid if platform.system() == 'Windows' else f'{walletname}_{txid}'
 
+def shell_escape_posix(arg):
+    # Identical to ShellEscape() in the C++ code
+    return "'" + arg.replace("'", "'\"'\"'") + "'"
+
 
 class NotificationsTest(BitcoinTestFramework):
     def set_test_params(self):
@@ -52,13 +55,18 @@ class NotificationsTest(BitcoinTestFramework):
         os.mkdir(self.walletnotify_dir)
         os.mkdir(self.shutdownnotify_dir)
 
+        if platform.system() == 'Windows':
+            walletnotify_path = f"\"{os.path.join(self.walletnotify_dir, notify_outputname('%w', '%s'))}\""
+        else:
+            walletnotify_path = f"{shell_escape_posix(os.path.join(self.walletnotify_dir, ''))}{notify_outputname('%w', '%s')}"
+
         # -alertnotify and -blocknotify on node0, walletnotify on node1
         self.extra_args = [[
-            f"-alertnotify=echo %s >> {self.alertnotify_file}",
-            f"-blocknotify=echo > {os.path.join(self.blocknotify_dir, '%s')}",
-            f"-shutdownnotify=echo > {self.shutdownnotify_file}",
+            f"-alertnotify=echo %s >> \"{self.alertnotify_file}\"",
+            f"-blocknotify=echo > \"{os.path.join(self.blocknotify_dir, '%s')}\"",
+            f"-shutdownnotify=echo > \"{self.shutdownnotify_file}\"",
         ], [
-            f"-walletnotify=echo %h_%b > {os.path.join(self.walletnotify_dir, notify_outputname('%w', '%s'))}",
+            f"-walletnotify=echo %h_%b > {walletnotify_path}",
         ]]
         self.wallet_names = [self.default_wallet_name, self.wallet]
         super().setup_network()
@@ -174,7 +182,7 @@ class NotificationsTest(BitcoinTestFramework):
 
         invalid_blocks = []
         for _ in range(7):  # invalid chain must be longer than 6 blocks to trigger warning
-            block = create_block(int(tip, 16), create_coinbase(height), block_time)
+            block = create_block(int(tip, 16), height=height, ntime=block_time)
             # make block invalid by exceeding block subsidy
             block.vtx[0].vout[0].nValue += 1
             block.hashMerkleRoot = block.calc_merkle_root()

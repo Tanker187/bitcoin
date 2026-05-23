@@ -164,7 +164,7 @@ To run clang-tidy on Ubuntu/Debian, install the dependencies:
 apt install clang-tidy clang
 ```
 
-Configure with clang as the compiler:
+Configure with clang as the compiler with the below command that should create a `compile_commands.json` file within the build directory:
 
 ```sh
 cmake -B build -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
@@ -172,11 +172,18 @@ cmake -B build -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_EXP
 
 The output is denoised of errors from external dependencies.
 
-To run clang-tidy on all source files:
+To run clang-tidy on all source files using the checks mentioned in the `./src/.clang-tidy` file:
 
 ```sh
 ( cd ./src/ && run-clang-tidy -p ../build -j $(nproc) )
 ```
+
+To run clang-tidy on one file:
+```sh
+( cd ./src/ && run-clang-tidy -p ../build -j $(nproc) ./path/to/single_file.cpp )
+```
+
+Optionally, append the `run-clang-tidy` command with the `-quiet` option to suppress printing of statistics and ignored warnings that can clutter the output. The `-fix` option also comes in handy to apply the fixes suggested by the tool but need to ensure that unrelated changes in the file are not committed.
 
 To run clang-tidy on the changed source lines:
 
@@ -457,7 +464,8 @@ LLVM_PROFILE_FILE="$(pwd)/build/raw_profile_data/%m_%p.profraw" ctest --test-dir
 LLVM_PROFILE_FILE="$(pwd)/build/raw_profile_data/%m_%p.profraw" build/test/functional/test_runner.py # Append "-j N" here for N parallel jobs
 
 # Merge all the raw profile data into a single file
-find build/raw_profile_data -name "*.profraw" | xargs llvm-profdata merge -o build/coverage.profdata
+find build/raw_profile_data -name "*.profraw" > build/raw_profile_data_files.txt
+llvm-profdata merge -f build/raw_profile_data_files.txt -o build/coverage.profdata
 ```
 
 > **Note:** The "counter mismatch" warning can be safely ignored, though it can be resolved by updating to Clang 19.
@@ -531,22 +539,32 @@ The generated coverage report can be accessed at `build/coverage_report/index.ht
 The [`include-what-you-use`](https://github.com/include-what-you-use/include-what-you-use) tool (IWYU)
 helps to enforce the source code organization [policy](#source-code-organization) in this repository.
 
-To ensure consistency, it is recommended to run the IWYU CI job locally rather than running the tool directly.
+To reproduce the IWYU CI job locally, run:
+```bash
+env -i HOME="$HOME" PATH="$PATH" USER="$USER" MAKEJOBS="-j1" FILE_ENV="./ci/test/00_setup_env_native_iwyu.sh" ./ci/test_run_all.sh || echo "IWYU failed"
+```
 
 In some cases, IWYU might suggest headers that seem unnecessary at first glance, but are actually required.
 For example, a macro may use a symbol that requires its own include. Another example is passing a string literal
 to a function that accepts a `std::string` parameter. An implicit conversion occurs at the callsite using the
 `std::string` constructor, which makes the corresponding header required. We accept these suggestions as is.
 
-Use `IWYU pragma: export` very sparingly, as this enforces transitive inclusion of headers
-and undermines the specific purpose of IWYU.
+If the provided IWYU CI job still produces a false positive, reduce it to a minimal reproducer and report it upstream.
+
+Use IWYU pragmas sparingly.
+
+Use `IWYU pragma: keep` only as a narrow workaround when needed.
+
+Use `IWYU pragma: associated` only when IWYU cannot infer the intended associated header.
+
+Use `IWYU pragma: export` very sparingly, as this enforces transitive inclusion of headers and undermines the specific purpose of IWYU.
 
 The acceptable cases for using `IWYU pragma: export` are:
 1. Facade headers. For example, see [`compat/compat.h`](/src/compat/compat.h).
 2. Drop-in replacement headers. For example, see [`util/time.h`](/src/util/time.h).
 3. Presenting a complete interface across multiple headers.
 
-A comment explaining the rationale is required for every use of `IWYU pragma: export`.
+For IWYU pragmas, prefer adding a nearby source comment that explains why the annotation is needed.
 
 ### Performance profiling with perf
 
@@ -736,13 +754,12 @@ logging messages. They should be used as follows:
   most of the time, and it should be used for log messages that are
   useful for debugging and can reasonably be enabled on a production
   system (that has sufficient free storage space). They will be logged
-  if the program is started with `-debug=category` or `-debug=1`.
+  if the program is started with `-debug=category` or `-debug=1`, or
+  the category is enabled through the `logging` RPC.
 
 - `LogInfo(fmt, params...)` should only be used rarely, e.g. for startup
   messages or for infrequent and important events such as a new block tip
-  being found or a new outbound connection being made. These log messages
-  are unconditional, so care must be taken that they can't be used by an
-  attacker to fill up storage.
+  being found or a new outbound connection being made.
 
 - `LogError(fmt, params...)` should be used in place of `LogInfo` for
   severe problems that require the node (or a subsystem) to shut down
@@ -763,6 +780,13 @@ logging messages. They should be used as follows:
 Note that the format strings and parameters of `LogDebug` and `LogTrace`
 are only evaluated if the logging category is enabled, so you must be
 careful to avoid side-effects in those expressions.
+
+While `LogInfo`, `LogWarning` and `LogError` messages should be rare,
+in case there are circumstances where they are not, those messages
+are automatically rate-limited to prevent potential disk-filling
+attacks. For the cases where this protection is undesirable,
+rate-limiting can be avoided with the `util::log::NO_RATE_LIMIT` tag, eg
+`LogInfo(util::log::NO_RATE_LIMIT, "UpdateTip: new best=%s ...",...)`.
 
 ## General C++
 

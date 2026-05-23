@@ -15,13 +15,13 @@
 #include <consensus/tx_verify.h>
 #include <consensus/validation.h>
 #include <deploymentstatus.h>
-#include <logging.h>
 #include <node/context.h>
 #include <node/kernel_notifications.h>
 #include <policy/feerate.h>
 #include <policy/policy.h>
 #include <pow.h>
 #include <primitives/transaction.h>
+#include <util/log.h>
 #include <util/moneystr.h>
 #include <util/signalinterrupt.h>
 #include <util/time.h>
@@ -184,14 +184,18 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     // increasing its length would reduce the space they can use and may break
     // existing clients.
     coinbaseTx.vin[0].scriptSig = CScript() << nHeight;
-    if (m_options.include_dummy_extranonce) {
+    // Set script_sig_prefix here, so IPC mining clients are not affected by
+    // the optional scriptSig padding below. They provide their own extraNonce,
+    // and in a typical setup a pool name or realistic extraNonce already makes
+    // the scriptSig long enough.
+    coinbase_tx.script_sig_prefix = coinbaseTx.vin[0].scriptSig;
+    if (nHeight <= 16) {
         // For blocks at heights <= 16, the BIP34-encoded height alone is only
         // one byte. Consensus requires coinbase scriptSigs to be at least two
-        // bytes long (bad-cb-length), so tests and regtest include a dummy
-        // extraNonce (OP_0)
+        // bytes long (bad-cb-length), so an OP_0 is always appended at those
+        // heights.
         coinbaseTx.vin[0].scriptSig << OP_0;
     }
-    coinbase_tx.script_sig_prefix = coinbaseTx.vin[0].scriptSig;
     Assert(nHeight > 0);
     coinbaseTx.nLockTime = static_cast<uint32_t>(nHeight - 1);
     coinbase_tx.lock_time = coinbaseTx.nLockTime;
@@ -221,7 +225,6 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     pblock->nNonce         = 0;
 
     if (m_options.test_block_validity) {
-        // if nHeight <= 16, and include_dummy_extranonce=false this will fail due to bad-cb-length.
         if (BlockValidationState state{TestBlockValidity(m_chainstate, *pblock, /*check_pow=*/false, /*check_merkle_root=*/false)}; !state.IsValid()) {
             throw std::runtime_error(strprintf("TestBlockValidity failed: %s", state.ToString()));
         }
@@ -295,7 +298,7 @@ void BlockAssembler::addChunks()
 
     while (selected_transactions.size() > 0) {
         // Check to see if min fee rate is still respected.
-        if (chunk_feerate_vsize << m_options.blockMinFeeRate.GetFeePerVSize()) {
+        if (ByRatio{chunk_feerate_vsize} < ByRatio{m_options.blockMinFeeRate.GetFeePerVSize()}) {
             // Everything else we might consider has a lower feerate
             return;
         }

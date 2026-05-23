@@ -9,6 +9,7 @@
 #include <serialize.h>
 #include <span.h>
 #include <streams.h>
+#include <util/byte_units.h>
 #include <util/check.h>
 #include <util/fs.h>
 
@@ -19,9 +20,13 @@
 #include <stdexcept>
 #include <string>
 
+namespace leveldb {
+class Env;
+} // namespace leveldb
+
 static const size_t DBWRAPPER_PREALLOC_KEY_SIZE = 64;
 static const size_t DBWRAPPER_PREALLOC_VALUE_SIZE = 1024;
-static const size_t DBWRAPPER_MAX_FILE_SIZE = 32 << 20; // 32 MiB
+static const size_t DBWRAPPER_MAX_FILE_SIZE{32_MiB};
 
 //! User-controlled performance and debug options.
 struct DBOptions {
@@ -44,6 +49,12 @@ struct DBParams {
     bool obfuscate = false;
     //! Passed-through options.
     DBOptions options{};
+    //! If non-null, use this as the leveldb::Env instead of the default.
+    //! Caller retains ownership.
+    leveldb::Env* testing_env = nullptr;
+    //! Maximum LevelDB SST file size. Larger values reduce the frequency
+    //! of compactions but increase their duration.
+    size_t max_file_size = DBWRAPPER_MAX_FILE_SIZE;
 };
 
 class dbwrapper_error : public std::runtime_error
@@ -78,10 +89,10 @@ private:
     struct WriteBatchImpl;
     const std::unique_ptr<WriteBatchImpl> m_impl_batch;
 
-    DataStream ssKey{};
-    DataStream ssValue{};
+    DataStream m_key_scratch{};
+    DataStream m_value_scratch{};
 
-    void WriteImpl(std::span<const std::byte> key, DataStream& ssValue);
+    void WriteImpl(std::span<const std::byte> key, DataStream& value);
     void EraseImpl(std::span<const std::byte> key);
 
 public:
@@ -95,22 +106,18 @@ public:
     template <typename K, typename V>
     void Write(const K& key, const V& value)
     {
-        ssKey.reserve(DBWRAPPER_PREALLOC_KEY_SIZE);
-        ssValue.reserve(DBWRAPPER_PREALLOC_VALUE_SIZE);
-        ssKey << key;
-        ssValue << value;
-        WriteImpl(ssKey, ssValue);
-        ssKey.clear();
-        ssValue.clear();
+        ScopedDataStreamUsage scoped_key{m_key_scratch}, scoped_value{m_value_scratch};
+        m_key_scratch << key;
+        m_value_scratch << value;
+        WriteImpl(m_key_scratch, m_value_scratch);
     }
 
     template <typename K>
     void Erase(const K& key)
     {
-        ssKey.reserve(DBWRAPPER_PREALLOC_KEY_SIZE);
-        ssKey << key;
-        EraseImpl(ssKey);
-        ssKey.clear();
+        ScopedDataStreamUsage scoped_key{m_key_scratch};
+        m_key_scratch << key;
+        EraseImpl(m_key_scratch);
     }
 
     size_t ApproximateSize() const;
@@ -124,6 +131,7 @@ public:
 private:
     const CDBWrapper &parent;
     const std::unique_ptr<IteratorImpl> m_impl_iter;
+    DataStream m_scratch{};
 
     void SeekImpl(std::span<const std::byte> key);
     std::span<const std::byte> GetKeyImpl() const;
@@ -143,17 +151,16 @@ public:
     void SeekToFirst();
 
     template<typename K> void Seek(const K& key) {
-        DataStream ssKey{};
-        ssKey.reserve(DBWRAPPER_PREALLOC_KEY_SIZE);
-        ssKey << key;
-        SeekImpl(ssKey);
+        ScopedDataStreamUsage scoped_scratch{m_scratch};
+        m_scratch << key;
+        SeekImpl(m_scratch);
     }
 
     void Next();
 
     template<typename K> bool GetKey(K& key) {
         try {
-            DataStream ssKey{GetKeyImpl()};
+            SpanReader ssKey{GetKeyImpl()};
             ssKey >> key;
         } catch (const std::exception&) {
             return false;
@@ -163,9 +170,10 @@ public:
 
     template<typename V> bool GetValue(V& value) {
         try {
-            DataStream ssValue{GetValueImpl()};
-            dbwrapper_private::GetObfuscation(parent)(ssValue);
-            ssValue >> value;
+            ScopedDataStreamUsage scoped_scratch{m_scratch};
+            m_scratch.write(GetValueImpl());
+            dbwrapper_private::GetObfuscation(parent)(m_scratch);
+            m_scratch >> value;
         } catch (const std::exception&) {
             return false;
         }

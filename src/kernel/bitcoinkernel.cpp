@@ -8,6 +8,7 @@
 
 #include <chain.h>
 #include <coins.h>
+#include <consensus/tx_check.h>
 #include <consensus/validation.h>
 #include <dbwrapper.h>
 #include <kernel/caches.h>
@@ -146,6 +147,7 @@ struct Handle {
 struct btck_BlockTreeEntry: Handle<btck_BlockTreeEntry, CBlockIndex> {};
 struct btck_Block : Handle<btck_Block, std::shared_ptr<const CBlock>> {};
 struct btck_BlockValidationState : Handle<btck_BlockValidationState, BlockValidationState> {};
+struct btck_TxValidationState : Handle<btck_TxValidationState, TxValidationState> {};
 
 namespace {
 
@@ -905,6 +907,13 @@ const btck_BlockTreeEntry* btck_block_tree_entry_get_previous(const btck_BlockTr
     return btck_BlockTreeEntry::ref(btck_BlockTreeEntry::get(entry).pprev);
 }
 
+const btck_BlockTreeEntry* btck_block_tree_entry_get_ancestor(const btck_BlockTreeEntry* block_tree_entry, int32_t height)
+{
+    const auto* ancestor{btck_BlockTreeEntry::get(block_tree_entry).GetAncestor(height)};
+    assert(ancestor);
+    return btck_BlockTreeEntry::ref(ancestor);
+}
+
 btck_BlockValidationState* btck_block_validation_state_create()
 {
     return btck_BlockValidationState::create();
@@ -1331,19 +1340,20 @@ int btck_chainstate_manager_process_block(
     return result ? 0 : -1;
 }
 
-int btck_chainstate_manager_process_block_header(
+btck_BlockValidationState* btck_chainstate_manager_process_block_header(
     btck_ChainstateManager* chainstate_manager,
-    const btck_BlockHeader* header,
-    btck_BlockValidationState* state)
+    const btck_BlockHeader* header)
 {
     try {
         auto& chainman = btck_ChainstateManager::get(chainstate_manager).m_chainman;
-        auto result = chainman->ProcessNewBlockHeaders({&btck_BlockHeader::get(header), 1}, /*min_pow_checked=*/true, btck_BlockValidationState::get(state), /*ppindex=*/nullptr);
 
-        return result ? 0 : -1;
+        auto state = btck_BlockValidationState::create();
+        bool result{chainman->ProcessNewBlockHeaders({&btck_BlockHeader::get(header), 1}, /*min_pow_checked=*/true, btck_BlockValidationState::get(state))};
+        assert(result == btck_BlockValidationState::get(state).IsValid());
+        return state;
     } catch (const std::exception& e) {
         LogError("Failed to process block header: %s", e.what());
-        return -1;
+        return nullptr;
     }
 }
 
@@ -1352,13 +1362,13 @@ const btck_Chain* btck_chainstate_manager_get_active_chain(const btck_Chainstate
     return btck_Chain::ref(&WITH_LOCK(btck_ChainstateManager::get(chainman).m_chainman->GetMutex(), return btck_ChainstateManager::get(chainman).m_chainman->ActiveChain()));
 }
 
-int btck_chain_get_height(const btck_Chain* chain)
+int32_t btck_chain_get_height(const btck_Chain* chain)
 {
     LOCK(::cs_main);
     return btck_Chain::get(chain).Height();
 }
 
-const btck_BlockTreeEntry* btck_chain_get_by_height(const btck_Chain* chain, int height)
+const btck_BlockTreeEntry* btck_chain_get_by_height(const btck_Chain* chain, int32_t height)
 {
     LOCK(::cs_main);
     return btck_BlockTreeEntry::ref(btck_Chain::get(chain)[height]);
@@ -1367,7 +1377,7 @@ const btck_BlockTreeEntry* btck_chain_get_by_height(const btck_Chain* chain, int
 int btck_chain_contains(const btck_Chain* chain, const btck_BlockTreeEntry* entry)
 {
     LOCK(::cs_main);
-    return btck_Chain::get(chain).Contains(&btck_BlockTreeEntry::get(entry)) ? 1 : 0;
+    return btck_Chain::get(chain).Contains(btck_BlockTreeEntry::get(entry)) ? 1 : 0;
 }
 
 btck_BlockHeader* btck_block_header_create(const void* raw_block_header, size_t raw_block_header_len)
@@ -1436,4 +1446,50 @@ int btck_block_header_to_bytes(const btck_BlockHeader* header, unsigned char out
 void btck_block_header_destroy(btck_BlockHeader* header)
 {
     delete header;
+}
+
+btck_ValidationMode btck_tx_validation_state_get_validation_mode(const btck_TxValidationState* state_)
+{
+    const auto& state = btck_TxValidationState::get(state_);
+    if (state.IsValid()) return btck_ValidationMode_VALID;
+    if (state.IsInvalid()) return btck_ValidationMode_INVALID;
+    return btck_ValidationMode_INTERNAL_ERROR;
+}
+
+btck_TxValidationState* btck_tx_validation_state_create()
+{
+    return btck_TxValidationState::create();
+}
+
+btck_TxValidationResult btck_tx_validation_state_get_tx_validation_result(const btck_TxValidationState* state_)
+{
+    switch (btck_TxValidationState::get(state_).GetResult()) {
+    case TxValidationResult::TX_RESULT_UNSET:        return btck_TxValidationResult_UNSET;
+    case TxValidationResult::TX_CONSENSUS:           return btck_TxValidationResult_CONSENSUS;
+    case TxValidationResult::TX_INPUTS_NOT_STANDARD: return btck_TxValidationResult_INPUTS_NOT_STANDARD;
+    case TxValidationResult::TX_NOT_STANDARD:        return btck_TxValidationResult_NOT_STANDARD;
+    case TxValidationResult::TX_MISSING_INPUTS:      return btck_TxValidationResult_MISSING_INPUTS;
+    case TxValidationResult::TX_PREMATURE_SPEND:     return btck_TxValidationResult_PREMATURE_SPEND;
+    case TxValidationResult::TX_WITNESS_MUTATED:     return btck_TxValidationResult_WITNESS_MUTATED;
+    case TxValidationResult::TX_WITNESS_STRIPPED:    return btck_TxValidationResult_WITNESS_STRIPPED;
+    case TxValidationResult::TX_CONFLICT:            return btck_TxValidationResult_CONFLICT;
+    case TxValidationResult::TX_MEMPOOL_POLICY:      return btck_TxValidationResult_MEMPOOL_POLICY;
+    case TxValidationResult::TX_NO_MEMPOOL:          return btck_TxValidationResult_NO_MEMPOOL;
+    case TxValidationResult::TX_RECONSIDERABLE:      return btck_TxValidationResult_RECONSIDERABLE;
+    case TxValidationResult::TX_UNKNOWN:             return btck_TxValidationResult_UNKNOWN;
+    } // no default case, so the compiler can warn about missing cases
+    assert(false);
+}
+
+void btck_tx_validation_state_destroy(btck_TxValidationState* state)
+{
+    delete state;
+}
+
+int btck_transaction_check(const btck_Transaction* tx, btck_TxValidationState* validation_state)
+{
+    auto& state = btck_TxValidationState::get(validation_state);
+    state = TxValidationState{};
+    const bool ok = CheckTransaction(*btck_Transaction::get(tx), state);
+    return ok ? 1 : 0;
 }

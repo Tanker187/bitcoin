@@ -381,6 +381,7 @@ CNode* CConnman::ConnectNode(CAddress addrConnect,
                              bool use_v2transport,
                              const std::optional<Proxy>& proxy_override)
 {
+    AssertLockNotHeld(m_nodes_mutex);
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
     assert(conn_type != ConnectionType::INBOUND);
 
@@ -566,7 +567,7 @@ void CNode::CloseSocketDisconnect()
             m_addr_name.c_str(),
             ConnectionTypeAsString().c_str(),
             ConnectedThroughNetwork(),
-            Ticks<std::chrono::seconds>(m_connected));
+            TicksSinceEpoch<std::chrono::seconds>(m_connected));
     }
     m_i2p_sam_session.reset();
 }
@@ -662,9 +663,9 @@ void CNode::CopyStats(CNodeStats& stats)
 bool CNode::ReceiveMsgBytes(std::span<const uint8_t> msg_bytes, bool& complete)
 {
     complete = false;
-    const auto time = GetTime<std::chrono::microseconds>();
+    const auto time{NodeClock::now()};
     LOCK(cs_vRecv);
-    m_last_recv = std::chrono::duration_cast<std::chrono::seconds>(time);
+    m_last_recv = time;
     nRecvBytes += msg_bytes.size();
     while (msg_bytes.size() > 0) {
         // absorb network data
@@ -800,7 +801,7 @@ const uint256& V1Transport::GetMessageHash() const
     return data_hash;
 }
 
-CNetMessage V1Transport::GetReceivedMessage(const std::chrono::microseconds time, bool& reject_message)
+CNetMessage V1Transport::GetReceivedMessage(NodeClock::time_point time, bool& reject_message)
 {
     AssertLockNotHeld(m_recv_mutex);
     // Initialize out parameter
@@ -1452,7 +1453,7 @@ std::optional<std::string> V2Transport::GetMessageType(std::span<const uint8_t>&
     return ret;
 }
 
-CNetMessage V2Transport::GetReceivedMessage(std::chrono::microseconds time, bool& reject_message) noexcept
+CNetMessage V2Transport::GetReceivedMessage(NodeClock::time_point time, bool& reject_message) noexcept
 {
     AssertLockNotHeld(m_recv_mutex);
     LOCK(m_recv_mutex);
@@ -1643,7 +1644,7 @@ std::pair<size_t, bool> CConnman::SocketSendData(CNode& node) const
             nBytes = node.m_sock->Send(data.data(), data.size(), flags);
         }
         if (nBytes > 0) {
-            node.m_last_send = GetTime<std::chrono::seconds>();
+            node.m_last_send = NodeClock::now();
             node.nSendBytes += nBytes;
             // Notify transport that bytes have been processed.
             node.m_transport->MarkBytesSent(nBytes);
@@ -1688,6 +1689,8 @@ std::pair<size_t, bool> CConnman::SocketSendData(CNode& node) const
  */
 bool CConnman::AttemptToEvictConnection()
 {
+    AssertLockNotHeld(m_nodes_mutex);
+
     std::vector<NodeEvictionCandidate> vEvictionCandidates;
     {
 
@@ -1727,7 +1730,7 @@ bool CConnman::AttemptToEvictConnection()
                 pnode->m_addr_name.c_str(),
                 pnode->ConnectionTypeAsString().c_str(),
                 pnode->ConnectedThroughNetwork(),
-                Ticks<std::chrono::seconds>(pnode->m_connected));
+                TicksSinceEpoch<std::chrono::seconds>(pnode->m_connected));
             pnode->fDisconnect = true;
             return true;
         }
@@ -1736,6 +1739,8 @@ bool CConnman::AttemptToEvictConnection()
 }
 
 void CConnman::AcceptConnection(const ListenSocket& hListenSocket) {
+    AssertLockNotHeld(m_nodes_mutex);
+
     struct sockaddr_storage sockaddr;
     socklen_t len = sizeof(sockaddr);
     auto sock = hListenSocket.sock->Accept((struct sockaddr*)&sockaddr, &len);
@@ -1768,6 +1773,8 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
                                             const CService& addr_bind,
                                             const CService& addr)
 {
+    AssertLockNotHeld(m_nodes_mutex);
+
     int nInbound = 0;
 
     const bool inbound_onion = std::find(m_onion_binds.begin(), m_onion_binds.end(), addr_bind) != m_onion_binds.end();
@@ -1875,6 +1882,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
 
 bool CConnman::AddConnection(const std::string& address, ConnectionType conn_type, bool use_v2transport = false)
 {
+    AssertLockNotHeld(m_nodes_mutex);
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
     std::optional<int> max_connections;
     switch (conn_type) {
@@ -1992,6 +2000,8 @@ void CConnman::DisconnectNodes()
 
 void CConnman::NotifyNumConnectionsChanged()
 {
+    AssertLockNotHeld(m_nodes_mutex);
+
     size_t nodes_size;
     {
         LOCK(m_nodes_mutex);
@@ -2005,12 +2015,12 @@ void CConnman::NotifyNumConnectionsChanged()
     }
 }
 
-bool CConnman::ShouldRunInactivityChecks(const CNode& node, std::chrono::microseconds now) const
+bool CConnman::ShouldRunInactivityChecks(const CNode& node, NodeClock::time_point now) const
 {
     return node.m_connected + m_peer_connect_timeout < now;
 }
 
-bool CConnman::InactivityCheck(const CNode& node, std::chrono::microseconds now) const
+bool CConnman::InactivityCheck(const CNode& node, NodeClock::time_point now) const
 {
     // Tests that see disconnects after using mocktime can start nodes with a
     // large timeout. For example, -peertimeout=999999999.
@@ -2019,8 +2029,8 @@ bool CConnman::InactivityCheck(const CNode& node, std::chrono::microseconds now)
 
     if (!ShouldRunInactivityChecks(node, now)) return false;
 
-    bool has_received{last_recv.count() != 0};
-    bool has_sent{last_send.count() != 0};
+    bool has_received{last_recv > NodeClock::epoch};
+    bool has_sent{last_send > NodeClock::epoch};
 
     if (!has_received || !has_sent) {
         std::string has_never;
@@ -2096,6 +2106,7 @@ Sock::EventsPerSock CConnman::GenerateWaitSockets(std::span<CNode* const> nodes)
 
 void CConnman::SocketHandler()
 {
+    AssertLockNotHeld(m_nodes_mutex);
     AssertLockNotHeld(m_total_bytes_sent_mutex);
 
     Sock::EventsPerSock events_per_sock;
@@ -2127,7 +2138,7 @@ void CConnman::SocketHandlerConnected(const std::vector<CNode*>& nodes,
 {
     AssertLockNotHeld(m_total_bytes_sent_mutex);
 
-    auto now = GetTime<std::chrono::microseconds>();
+    const auto now{NodeClock::now()};
 
     for (CNode* pnode : nodes) {
         if (m_interrupt_net->interrupted()) {
@@ -2226,6 +2237,8 @@ void CConnman::SocketHandlerConnected(const std::vector<CNode*>& nodes,
 
 void CConnman::SocketHandlerListening(const Sock::EventsPerSock& events_per_sock)
 {
+    AssertLockNotHeld(m_nodes_mutex);
+
     for (const ListenSocket& listen_socket : vhListenSocket) {
         if (m_interrupt_net->interrupted()) {
             return;
@@ -2409,6 +2422,7 @@ void CConnman::DumpAddresses()
 
 void CConnman::ProcessAddrFetch()
 {
+    AssertLockNotHeld(m_nodes_mutex);
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
     std::string strDest;
     {
@@ -2448,6 +2462,8 @@ void CConnman::StartExtraBlockRelayPeers()
 // Return the number of outbound connections that are full relay (not blocks only)
 int CConnman::GetFullOutboundConnCount() const
 {
+    AssertLockNotHeld(m_nodes_mutex);
+
     int nRelevant = 0;
     {
         LOCK(m_nodes_mutex);
@@ -2466,6 +2482,8 @@ int CConnman::GetFullOutboundConnCount() const
 // evict some peer that has finished the handshake)
 int CConnman::GetExtraFullOutboundCount() const
 {
+    AssertLockNotHeld(m_nodes_mutex);
+
     int full_outbound_peers = 0;
     {
         LOCK(m_nodes_mutex);
@@ -2480,6 +2498,8 @@ int CConnman::GetExtraFullOutboundCount() const
 
 int CConnman::GetExtraBlockRelayCount() const
 {
+    AssertLockNotHeld(m_nodes_mutex);
+
     int block_relay_peers = 0;
     {
         LOCK(m_nodes_mutex);
@@ -2513,6 +2533,8 @@ bool CConnman::MultipleManualOrFullOutboundConns(Network net) const
 
 bool CConnman::MaybePickPreferredNetwork(std::optional<Network>& network)
 {
+    AssertLockNotHeld(m_nodes_mutex);
+
     std::array<Network, 5> nets{NET_IPV4, NET_IPV6, NET_ONION, NET_I2P, NET_CJDNS};
     std::shuffle(nets.begin(), nets.end(), FastRandomContext());
 
@@ -2529,8 +2551,10 @@ bool CConnman::MaybePickPreferredNetwork(std::optional<Network>& network)
 
 void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std::span<const std::string> seed_nodes)
 {
-    AssertLockNotHeld(m_unused_i2p_sessions_mutex);
+    AssertLockNotHeld(m_nodes_mutex);
     AssertLockNotHeld(m_reconnections_mutex);
+    AssertLockNotHeld(m_unused_i2p_sessions_mutex);
+
     FastRandomContext rng;
     // Connect to specific addresses
     if (!connect.empty())
@@ -2900,6 +2924,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
 
 std::vector<CAddress> CConnman::GetCurrentBlockRelayOnlyConns() const
 {
+    AssertLockNotHeld(m_nodes_mutex);
     std::vector<CAddress> ret;
     LOCK(m_nodes_mutex);
     for (const CNode* pnode : m_nodes) {
@@ -2913,6 +2938,8 @@ std::vector<CAddress> CConnman::GetCurrentBlockRelayOnlyConns() const
 
 std::vector<AddedNodeInfo> CConnman::GetAddedNodeInfo(bool include_connected) const
 {
+    AssertLockNotHeld(m_nodes_mutex);
+
     std::vector<AddedNodeInfo> ret;
 
     std::list<AddedNodeParams> lAddresses(0);
@@ -2973,8 +3000,10 @@ std::vector<AddedNodeInfo> CConnman::GetAddedNodeInfo(bool include_connected) co
 
 void CConnman::ThreadOpenAddedConnections()
 {
-    AssertLockNotHeld(m_unused_i2p_sessions_mutex);
+    AssertLockNotHeld(m_nodes_mutex);
     AssertLockNotHeld(m_reconnections_mutex);
+    AssertLockNotHeld(m_unused_i2p_sessions_mutex);
+
     while (true)
     {
         CountingSemaphoreGrant<> grant(*semAddnode);
@@ -3010,6 +3039,7 @@ bool CConnman::OpenNetworkConnection(const CAddress& addrConnect,
                                      bool use_v2transport,
                                      const std::optional<Proxy>& proxy_override)
 {
+    AssertLockNotHeld(m_nodes_mutex);
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
     assert(conn_type != ConnectionType::INBOUND);
 
@@ -3129,6 +3159,8 @@ Mutex NetEventsInterface::g_msgproc_mutex;
 
 void CConnman::ThreadMessageHandler()
 {
+    AssertLockNotHeld(m_nodes_mutex);
+
     LOCK(NetEventsInterface::g_msgproc_mutex);
 
     while (!flagInterruptMsgProc)
@@ -3168,6 +3200,8 @@ void CConnman::ThreadMessageHandler()
 
 void CConnman::ThreadI2PAcceptIncoming()
 {
+    AssertLockNotHeld(m_nodes_mutex);
+
     static constexpr auto err_wait_begin = 1s;
     static constexpr auto err_wait_cap = 5min;
     auto err_wait = err_wait_begin;
@@ -3211,6 +3245,7 @@ void CConnman::ThreadI2PAcceptIncoming()
 
 void CConnman::ThreadPrivateBroadcast()
 {
+    AssertLockNotHeld(m_nodes_mutex);
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
 
     size_t addrman_num_bad_addresses{0};
@@ -3640,6 +3675,7 @@ void CConnman::StopThreads()
 
 void CConnman::StopNodes()
 {
+    AssertLockNotHeld(m_nodes_mutex);
     AssertLockNotHeld(m_reconnections_mutex);
 
     if (fAddressesInitialized) {
@@ -3804,6 +3840,8 @@ uint32_t CConnman::GetMappedAS(const CNetAddr& addr) const
 
 void CConnman::GetNodeStats(std::vector<CNodeStats>& vstats) const
 {
+    AssertLockNotHeld(m_nodes_mutex);
+
     vstats.clear();
     LOCK(m_nodes_mutex);
     vstats.reserve(m_nodes.size());
@@ -3829,6 +3867,7 @@ bool CConnman::DisconnectNode(std::string_view strNode)
 
 bool CConnman::DisconnectNode(const CSubNet& subnet)
 {
+    AssertLockNotHeld(m_nodes_mutex);
     bool disconnected = false;
     LOCK(m_nodes_mutex);
     for (CNode* pnode : m_nodes) {
@@ -3843,6 +3882,7 @@ bool CConnman::DisconnectNode(const CSubNet& subnet)
 
 bool CConnman::DisconnectNode(const CNetAddr& addr)
 {
+    AssertLockNotHeld(m_nodes_mutex);
     return DisconnectNode(CSubNet(addr));
 }
 
@@ -3987,7 +4027,7 @@ CNode::CNode(NodeId idIn,
     : m_transport{MakeTransport(idIn, node_opts.use_v2transport, conn_type_in == ConnectionType::INBOUND)},
       m_permission_flags{node_opts.permission_flags},
       m_sock{sock},
-      m_connected{GetTime<std::chrono::seconds>()},
+      m_connected{NodeClock::now()},
       addr{addrIn},
       addrBind{addrBindIn},
       m_addr_name{addrNameIn.empty() ? addr.ToStringAddrPort() : addrNameIn},
@@ -4125,6 +4165,8 @@ void CConnman::PushMessage(CNode* pnode, CSerializedNetMsg&& msg)
 
 bool CConnman::ForNode(NodeId id, std::function<bool(CNode* pnode)> func)
 {
+    AssertLockNotHeld(m_nodes_mutex);
+
     CNode* found = nullptr;
     LOCK(m_nodes_mutex);
     for (auto&& pnode : m_nodes) {
@@ -4150,6 +4192,7 @@ uint64_t CConnman::CalculateKeyedNetGroup(const CNetAddr& address) const
 
 void CConnman::PerformReconnections()
 {
+    AssertLockNotHeld(m_nodes_mutex);
     AssertLockNotHeld(m_reconnections_mutex);
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
     while (true) {
