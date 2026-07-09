@@ -232,6 +232,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   node/mempool_persist.cpp
   node/mempool_persist_args.cpp
   node/miner.cpp
+  node/mining_args.cpp
   node/mini_miner.cpp
   node/minisketchwrapper.cpp
   node/peerman_args.cpp
@@ -288,10 +289,7 @@ target_link_libraries(bitcoin_node
     leveldb
     minisketch
     univalue
-    Boost::headers
-    $<TARGET_NAME_IF_EXISTS:libevent::core>
-    $<TARGET_NAME_IF_EXISTS:libevent::extra>
-    $<TARGET_NAME_IF_EXISTS:libevent::pthreads>
+    $<TARGET_NAME_IF_EXISTS:Boost::headers>
     $<TARGET_NAME_IF_EXISTS:USDT::headers>
 )
 if(WITH_EMBEDDED_ASMAP)

@@ -959,6 +959,18 @@ BITCOINKERNEL_API btck_ChainParameters* BITCOINKERNEL_WARN_UNUSED_RESULT btck_ch
     btck_ChainType chain_type);
 
 /**
+ * @brief Create a signet chain parameters struct with a user-provided
+ * challenge.
+ *
+ * @param[in] challenge     The signet challenge value. Blocks must satisfy it in
+ *                          order to be valid.
+ * @param[in] challenge_len The length of the signet challenge.
+ * @return                  An allocated chain parameters opaque struct.
+ */
+BITCOINKERNEL_API btck_ChainParameters* BITCOINKERNEL_WARN_UNUSED_RESULT btck_chain_parameters_create_signet(
+    const void* challenge, size_t challenge_len);
+
+/**
  * Copy the chain parameters.
  */
 BITCOINKERNEL_API btck_ChainParameters* BITCOINKERNEL_WARN_UNUSED_RESULT btck_chain_parameters_copy(
@@ -1151,12 +1163,11 @@ BITCOINKERNEL_API const btck_BlockTreeEntry* btck_block_tree_entry_get_ancestor(
  *
  * @param[in] context          Non-null, the created options and through it the chainstate manager will
  *                             associate with this kernel context for the duration of their lifetimes.
- * @param[in] data_directory   Non-null, non-empty path string of the directory containing the
- *                             chainstate data. If the directory does not exist yet, it will be
- *                             created.
- * @param[in] blocks_directory Non-null, non-empty path string of the directory containing the block
- *                             data. If the directory does not exist yet, it will be created.
- * @return                     The allocated chainstate manager options, or null on error.
+ * @param[in] data_directory   Path string of the directory containing the chainstate data. If the directory
+ *                             does not exist yet, it will be created.
+ * @param[in] blocks_directory Path string of the directory containing the block data. If the directory
+ *                             does not exist yet, it will be created.
+ * @return                     The allocated chainstate manager options, or null on error (e.g. if a path is invalid).
  */
 BITCOINKERNEL_API btck_ChainstateManagerOptions* BITCOINKERNEL_WARN_UNUSED_RESULT btck_chainstate_manager_options_create(
     const btck_Context* context,
@@ -1877,7 +1888,7 @@ BITCOINKERNEL_API void btck_block_hash_destroy(btck_BlockHash* block_hash);
  * @return                          btck_BlockHeader, or null on error.
  */
 BITCOINKERNEL_API btck_BlockHeader* BITCOINKERNEL_WARN_UNUSED_RESULT btck_block_header_create(
-    const void* raw_block_header, size_t raw_block_header_len);
+    const void* raw_block_header, size_t raw_block_header_len) BITCOINKERNEL_ARG_NONNULL(1);
 
 /**
  * @brief Copy a btck_BlockHeader.

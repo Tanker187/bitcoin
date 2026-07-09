@@ -6,12 +6,22 @@
 #define BITCOIN_SCRIPT_DESCRIPTOR_H
 
 #include <outputtype.h>
-#include <script/script.h>
-#include <script/sign.h>
-#include <script/signingprovider.h>
+#include <pubkey.h>
+#include <uint256.h>
 
+#include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <optional>
+#include <set>
+#include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
+
+class CScript;
+class SigningProvider;
+struct FlatSigningProvider;
 
 using ExtPubKeyMap = std::unordered_map<uint32_t, CExtPubKey>;
 
@@ -129,6 +139,9 @@ struct Descriptor {
 
     /** Convert the descriptor to a normalized string. Normalized descriptors have the xpub at the last hardened step. This fails if the provided provider does not have the private keys to derive that xpub. */
     virtual bool ToNormalizedString(const SigningProvider& provider, std::string& out, const DescriptorCache* cache = nullptr) const = 0;
+
+    /** Whether the descriptor can be used to produce its address(es) without needing a cache or private keys. */
+    virtual bool CanSelfExpand() const = 0;
 
     /** Expand a descriptor at a specified position.
      *
